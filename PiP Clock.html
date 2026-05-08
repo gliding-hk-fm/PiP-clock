@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>High-Res PiP Clock 160x90</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Google%20Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+<style>
+  body { font-family: "Google Sans", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; }
+  #controls { display:flex; gap:8px; align-items:center; }
+  button { padding:8px 12px; border-radius:6px; border:1px solid #ccc; background:#f5f5f5; cursor:pointer; }
+  /* Hidden video used for PiP must be in DOM but can be visually hidden */
+  video.pip-host { position: absolute; width:1px; height:1px; left:-9999px; top:auto; overflow:hidden; }
+  /* Visible small preview (optional) */
+  #preview { width:160px; height:90px; border-radius:8px; box-shadow:0 6px 18px rgba(0,0,0,0.2); display:none; }
+</style>
+</head>
+<body>
+
+<div id="controls">
+  <button id="start">Start PiP Clock</button>
+  <button id="stop" disabled>Stop PiP</button>
+  <canvas id="preview" aria-hidden="true"></canvas>
+</div>
+
+<!-- CSS size controls the PiP window target size; internal resolution is scaled for crispness -->
+<canvas id="clockCanvas" width="160" height="90" style="display:none;"></canvas>
+
+<script>
+  // Base CSS size for PiP (restored to the first size)
+  const baseWidth = 160;   // CSS pixels
+  const baseHeight = 90;   // CSS pixels
+
+  const canvas = document.getElementById('clockCanvas');
+  const preview = document.getElementById('preview');
+  const ctx = canvas.getContext('2d', { alpha: true });
+
+  let rafId = null;
+  let pipWindow = null;
+  let stream = null;
+  let videoEl = null;
+
+  // Increase internal pixel density multiplier for extra crispness
+  // Effective internal scale = devicePixelRatio * INTERNAL_SCALE
+  const INTERNAL_SCALE = 2; // increase to 3 for even sharper text at cost of CPU
+
+  function resizeForHighRes() {
+    const dpr = window.devicePixelRatio || 1;
+    const scale = dpr * INTERNAL_SCALE;
+
+    // Set canvas internal pixel size
+    canvas.width = Math.round(baseWidth * scale);
+    canvas.height = Math.round(baseHeight * scale);
+
+    // Keep CSS size so PiP window is the desired target size
+    canvas.style.width = baseWidth + 'px';
+    canvas.style.height = baseHeight + 'px';
+
+    // Also set preview canvas to show a tiny preview on the page (optional)
+    preview.width = baseWidth;
+    preview.height = baseHeight;
+    preview.style.display = 'block';
+
+    // Use transform so drawing coordinates are in CSS pixels
+    ctx.setTransform(scale, 0, 0, scale, 0, 0);
+  }
+
+  function pad(n){ return n.toString().padStart(2,'0'); }
+
+  // Return ordinal suffix for a day number (1st, 2nd, 3rd, 4th, etc.)
+  function ordinalSuffix(day) {
+    const j = day % 10, k = day % 100;
+    if (k >= 11 && k <= 13) return 'th';
+    if (j === 1) return 'st';
+    if (j === 2) return 'nd';
+    if (j === 3) return 'rd';
+return 'th';
+  }
+
+  // Format date as "Wed 18th March 2026"
+  function formatDateWithOrdinal(date) {
+    // Use locale-aware weekday short and month long
+    const weekday = date.toLocaleDateString(undefined, { weekday: 'short' }); // e.g., "Wed"
+    const month = date.toLocaleDateString(undefined, { month: 'long' }); // e.g., "March"
+    const day = date.getDate(); // numeric day
+    const year = date.getFullYear();
+    return `${weekday} ${day}${ordinalSuffix(day)} ${month} ${year}`;
+  }
+
+  function drawClock() {
+    const w = baseWidth;
+    const h = baseHeight;
+
+    // Clear (use transparent background so PiP can be rounded by OS)
+    ctx.clearRect(0,0,w,h);
+
+    // Rounded background
+    ctx.fillStyle = 'rgba(0,0,0,0.72)';
+    roundRect(ctx, 0, 0, w, h, 8, true, false);
+
+    // Time string
+    const now = new Date();
+    const hh = pad(now.getHours());
+    const mm = pad(now.getMinutes());
+    const ss = pad(now.getSeconds());
+    const timeStr = `${hh}:${mm}:${ss}`;
+
+    // Choose font sizes relative to CSS width for consistent scaling
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    // Big time (use a font size that looks good at this CSS size)
+    ctx.font = 'bold 25px "Google Sans", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial';
+    ctx.fillText(timeStr, w/2, h/2 - 6);
+
+    // Small date line using the new formatted date with ordinal
+    ctx.font = '10px "Google Sans", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial';
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.fillText(formatDateWithOrdinal(now), w/2, h - 10);
+
+    // Mirror to preview canvas for on-page tiny preview
+    const previewCtx = preview.getContext('2d');
+    previewCtx.clearRect(0,0,preview.width, preview.height);
+    previewCtx.drawImage(canvas, 0, 0, canvas.width, canvas.height, 0, 0, preview.width, preview.height);
+
+    rafId = requestAnimationFrame(drawClock);
+  }
+
+  // helper to draw rounded rect
+  function roundRect(ctx, x, y, width, height, radius, fill, stroke) {
+    if (typeof radius === 'number') radius = {tl: radius, tr: radius, br: radius, bl: radius};
+    ctx.beginPath();
+    ctx.moveTo(x + radius.tl, y);
+    ctx.lineTo(x + width - radius.tr, y);
+    ctx.quadraticCurveTo(x + width, y, x + width, y + radius.tr);
+    ctx.lineTo(x + width, y + height - radius.br);
+    ctx.quadraticCurveTo(x + width, y + height, x + width - radius.br, y + height);
+    ctx.lineTo(x + radius.bl, y + height);
+    ctx.quadraticCurveTo(x, y + height, x, y + height - radius.bl);
+    ctx.lineTo(x, y + radius.tl);
+    ctx.quadraticCurveTo(x, y, x + radius.tl, y);
+    ctx.closePath();
+    if (fill) ctx.fill();
+    if (stroke) ctx.stroke();
+  }
+
+  async function startPiP() {
+    if (!('requestPictureInPicture' in document.createElement('video'))) {
+      alert('Picture-in-Picture not supported in this browser.');
+      return;
+    }
+
+    resizeForHighRes();
+    drawClock();
+
+    // capture stream from canvas at 2fps
+    stream = canvas.captureStream(2);
+
+    // create hidden video element to host the stream
+    videoEl = document.createElement('video');
+    videoEl.className = 'pip-host';
+    videoEl.srcObject = stream;
+    videoEl.muted = true;
+    videoEl.playsInline = true;
+
+    // Some browsers use the video's intrinsic size for PiP; set small attributes too
+    videoEl.width = baseWidth;
+    videoEl.height = baseHeight;
+
+    document.body.appendChild(videoEl);
+
+    try {
+      await videoEl.play();
+      // request PiP; this must be triggered by user gesture (the click)
+      pipWindow = await videoEl.requestPictureInPicture();
+      document.getElementById('start').disabled = true;
+      document.getElementById('stop').disabled = false;
+
+      // when PiP is closed, clean up
+      pipWindow.addEventListener('leavepictureinpicture', stopPiP);
+    } catch (err) {
+      console.error('PiP error', err);
+      stopPiP();
+    }
+  }
+
+  function stopPiP() {
+    if (pipWindow && document.pictureInPictureElement) {
+      document.exitPictureInPicture().catch(()=>{});
+    }
+    if (rafId) cancelAnimationFrame(rafId);
+    rafId = null;
+    if (stream) {
+      stream.getTracks().forEach(t => t.stop());
+      stream = null;
+    }
+    if (videoEl) {
+      videoEl.pause();
+      videoEl.srcObject = null;
+      videoEl.remove();
+      videoEl = null;
+    }
+    // hide preview
+    preview.style.display = 'none';
+    document.getElementById('start').disabled = false;
+    document.getElementById('stop').disabled = true;
+  }
+
+  document.getElementById('start').addEventListener('click', startPiP);
+  document.getElementById('stop').addEventListener('click', stopPiP);
+
+  // Keep canvas crisp if DPR changes
+  let dprObserverTimer = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(dprObserverTimer);
+    dprObserverTimer = setTimeout(() => {
+      resizeForHighRes();
+    }, 120);
+  });
+</script>
+
+</body>
+</html>
